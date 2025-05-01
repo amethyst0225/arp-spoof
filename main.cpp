@@ -173,7 +173,6 @@ int main(int argc, char* argv[]) {
         Mac senderMac = getMac(handle, attackerIp, attackerMac, senderIp);
         Mac targetMac = getMac(handle, attackerIp, attackerMac, targetIp);
         sessions.push_back({ senderIp, senderMac, targetIp, targetMac });
-        // 즉시 한 번 중독
         poisonSession(handle, attackerMac, sessions.back());
         printf("[*] Poisoned %s <> %s\n",
                std::string(senderIp).c_str(),
