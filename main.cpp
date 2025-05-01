@@ -137,7 +137,6 @@ int main(int argc, char* argv[]) {
                std::string(targetIp).c_str());
     }
 
-    // IP forwarding 켜는 것도 잊지 마세요:
     //   sudo sysctl -w net.ipv4.ip_forward=1
 
     std::thread t1(poisonLoop, handle, attackerMac);
